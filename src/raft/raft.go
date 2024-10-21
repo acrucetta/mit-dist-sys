@@ -311,7 +311,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Function to send periodical heartbeats to all followers of the
 // leader node.
 func (rf *Raft) sendHeartbeats() {
-	return
+	// Every certain amount of time, send a heartbeat to all the followers of
+	// this particular node
+	for rf.killed() == false {
+		for peer := range rf.peers {
+			go func(peer int) {
+				DPrintf("%d becoming leader, sending heartbeats to: %d", rf.me, peer)
+				args := AppendEntriesArgs{}
+				reply := AppendEntriesReply{}
+				rf.sendAppendEntries(peer, &args, &reply)
+			}(peer)
+		}
+		time.Sleep(time.Millisecond * 150)
+	}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -395,21 +407,8 @@ func (rf *Raft) BecomeLeader() {
 			rf.nextIndex = 0
 			rf.matchIndex = 0
 		}
-		go func(peer int) {
-			DPrintf("%d becoming leader, sending heartbeats to: %d", rf.me, peer)
-			logLen := len(rf.logs)
-			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: logLen,
-				PrevLogTerm:  rf.logs[logLen].Term,
-				Logs:         rf.logs,
-				LeaderCommit: rf.commitIndex,
-			}
-			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(peer, &args, &reply)
-		}(peer)
 	}
+	go rf.sendHeartbeats()
 }
 
 func (rf *Raft) StartElection() {
