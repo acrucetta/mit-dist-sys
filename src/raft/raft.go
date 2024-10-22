@@ -38,6 +38,7 @@ Raft Properties:
 import (
 	//	"bytes"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -81,7 +82,7 @@ type LogEntry struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	// mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -391,8 +392,9 @@ func (rf *Raft) ticker() {
 }
 
 func RandomizedDuration() time.Duration {
-	randomDuration := 100 + (rand.Int63() % 200)
-	return time.Duration(randomDuration)
+	// random amount of time between 500 and 1000ms
+	randomDuration := 500 + (rand.Int63() % 1000)
+	return time.Duration(randomDuration * time.Hour.Milliseconds())
 }
 
 // Base function for the peer to become leader.
@@ -402,9 +404,14 @@ func (rf *Raft) BecomeLeader() {
 		It then sends heartbeat messages to all of the other
 		servers to establish its authority and prevent new elections.
 	*/
+	DPrintf("Node %d is becoming the leader", rf.me)
+	rf.state = Leader
+	rf.votedFor = -1
+
+	lenLogs := len(rf.logs)
 	for peer := range rf.peers {
 		if peer != rf.me {
-			rf.nextIndex = 0
+			rf.nextIndex = lenLogs
 			rf.matchIndex = 0
 		}
 	}
@@ -412,15 +419,17 @@ func (rf *Raft) BecomeLeader() {
 }
 
 func (rf *Raft) StartElection() {
-	// Election tasks:
-	// 1. Server becomes a candidate
-	rf.state = Candidate
-	// 2. Increase the current term.
-	rf.currentTerm += 1
-	// 3. Vote for self
-	rf.votedFor = rf.me
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	// 4. Reset election timer ??
+	if rf.state != Candidate {
+		return
+	}
+
+	// Election tasks:
+	rf.state = Candidate
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
 
 	// 5. Request votes from all peers
 	// 5.1 Issue RequestVote RPCs in parallel to
@@ -428,35 +437,42 @@ func (rf *Raft) StartElection() {
 	// 5.2 We continue in this state until
 	// we win, someone else wins, time runs out
 	votes := 1
-	for peer := range rf.peers {
-		if peer == rf.me {
-			continue
-		}
-		go func(peer int) {
-			args := RequestVoteArgs{
-				Term:         rf.currentTerm,
-				CandidateId:  rf.me,
-				LastLogIndex: rf.commitIndex,
-				LastLogTerm:  rf.logs[rf.commitIndex].Term,
+	if rf.killed() == false {
+		for peer := range rf.peers {
+			if peer == rf.me {
+				continue
 			}
-			reply := RequestVoteReply{}
-			if rf.sendRequestVote(peer, &args, &reply) {
-				// Parse result and check if someone won
-				if reply.VoteGranted {
-					votes++
-					// If we have the majority (>50%), become leader.
-					if votes > len(rf.peers)/2 && rf.state != Leader {
-						rf.BecomeLeader()
-					}
-					// If we didn't receive a vote, check if we're outdated
-					// if so, transition to Candidate state.
-				} else if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.state = Follower
-					rf.votedFor = -1
+			go func(peer int) {
+				args := RequestVoteArgs{
+					Term:         rf.currentTerm,
+					CandidateId:  rf.me,
+					LastLogIndex: len(rf.logs) - 1,
+					LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
 				}
-			}
-		}(peer)
+				reply := RequestVoteReply{}
+				if rf.sendRequestVote(peer, &args, &reply) {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+
+					if rf.state != Candidate {
+						return
+					}
+
+					if reply.VoteGranted {
+						votes++
+						if votes > len(rf.peers)/2 && rf.state != Leader {
+							rf.BecomeLeader()
+						}
+						// If we didn't receive a vote, check if we're outdated
+						// if so, transition to Candidate state.
+					} else if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.state = Follower
+						rf.votedFor = -1
+					}
+				}
+			}(peer)
+		}
 	}
 }
 
