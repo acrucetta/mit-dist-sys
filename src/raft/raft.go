@@ -2,11 +2,27 @@ package raft
 
 /*
 TODO
-- Add BecomeLeader logic
 - Add greppable logs in parts of the process
 - Run small tests with the high level structure
 	- Map each action to the methods
 	- See the PDF for more info
+
+AppendEntries Handler:
+Unsafe array access: args.Logs[args.PrevLogIndex] could panic if Logs is empty
+Not handling the case when it's a heartbeat (empty Logs)
+Not updating term and becoming follower when you see higher term
+Not setting leader's term in reply
+
+
+StartElection:
+You check if rf.state != Candidate at the start, but then immediately set it to Candidate anyway
+No election timer reset when starting new election
+Votes counting might have race conditions since it's a local variable
+
+
+BecomeLeader:
+Not properly initializing nextIndex and matchIndex arrays for all peers
+Lock not held during state change
 */
 
 /*
@@ -103,8 +119,8 @@ type Raft struct {
 	lastApplied int
 
 	// volatile state on leaders
-	nextIndex  int
-	matchIndex int
+	nextIndex  []int
+	matchIndex []int
 
 	// channels
 	heartbeatCh chan struct{}
@@ -113,11 +129,9 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (3A).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.state == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -199,13 +213,30 @@ type AppendEntriesReply struct {
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	DPrintf("AppendEntries called with args: %+v", args)
 
-	// False if term < current term
+	// If we're outdated, step down from candidate/leader and reset voting status
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor = -1
+	}
+
+	// If its just an empty message, update the heartbeats channel.
+	if args == (&AppendEntriesArgs{}) {
+		DPrintf("Peer %d received a heartbeat.", rf.me)
+		rf.heartbeatCh <- struct{}{}
+		return
+	}
+
+	// False if the requester's term is less than the current term
 	currTerm, _ := rf.GetState()
 	if args.Term < currTerm {
 		DPrintf("AppendEntries failed: args.Term (%d) < currTerm (%d)", args.Term, currTerm)
-		reply.Term = args.Term
+		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
@@ -241,16 +272,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = args.Term
 	reply.Success = true
 
-	// Received heartbeat successfully, update the channel
-	rf.heartbeatCh <- struct{}{}
-
 	DPrintf("AppendEntries succeeded: reply: %+v", reply)
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	// Your code here (3A, 3B).
+
+	// If we're outdated, step down from candidate/leader and reset voting status
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor = -1
+	}
+
 	currTerm, _ := rf.GetState()
 	if args.Term < currTerm {
 		reply.Term = args.Term
@@ -394,7 +432,7 @@ func (rf *Raft) ticker() {
 func RandomizedDuration() time.Duration {
 	// random amount of time between 500 and 1000ms
 	randomDuration := 500 + (rand.Int63() % 1000)
-	return time.Duration(randomDuration * time.Hour.Milliseconds())
+	return time.Duration(randomDuration) * time.Millisecond
 }
 
 // Base function for the peer to become leader.
@@ -411,14 +449,15 @@ func (rf *Raft) BecomeLeader() {
 	lenLogs := len(rf.logs)
 	for peer := range rf.peers {
 		if peer != rf.me {
-			rf.nextIndex = lenLogs
-			rf.matchIndex = 0
+			rf.nextIndex[peer] = lenLogs
+			rf.matchIndex[peer] = 0
 		}
 	}
 	go rf.sendHeartbeats()
 }
 
 func (rf *Raft) StartElection() {
+	DPrintf("Starting elections...")
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -464,7 +503,7 @@ func (rf *Raft) StartElection() {
 							rf.BecomeLeader()
 						}
 						// If we didn't receive a vote, check if we're outdated
-						// if so, transition to Candidate state.
+						// if so, transition to Follower state.
 					} else if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.state = Follower
@@ -496,13 +535,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]LogEntry, 1)
+	rf.state = Follower
 
-	rf.commitIndex = 0
+	rf.commitIndex = 1
 	rf.lastApplied = 0
 
-	rf.nextIndex = 1
-	rf.matchIndex = 0
-
+	rf.nextIndex = make([]int, len(rf.peers))
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = 1
+	}
+	rf.matchIndex = make([]int, len(rf.peers))
 	rf.heartbeatCh = make(chan struct{}, 1)
 
 	// 3A Task: Modify Make() to create a background goroutine that will
