@@ -3,26 +3,15 @@ package raft
 /*
 TODO
 - Add greppable logs in parts of the process
-- Run small tests with the high level structure
-	- Map each action to the methods
-	- See the PDF for more info
-
-AppendEntries Handler:
-Unsafe array access: args.Logs[args.PrevLogIndex] could panic if Logs is empty
-Not handling the case when it's a heartbeat (empty Logs)
-Not updating term and becoming follower when you see higher term
-Not setting leader's term in reply
-
 
 StartElection:
-You check if rf.state != Candidate at the start, but then immediately set it to Candidate anyway
-No election timer reset when starting new election
-Votes counting might have race conditions since it's a local variable
-
+- You check if rf.state != Candidate at the start, but then immediately set it to Candidate anyway
+- No election timer reset when starting new election
+- Votes counting might have race conditions since it's a local variable
 
 BecomeLeader:
-Not properly initializing nextIndex and matchIndex arrays for all peers
-Lock not held during state change
+- Not properly initializing nextIndex and matchIndex arrays for all peers
+- Lock not held during state change
 */
 
 /*
@@ -226,7 +215,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// If its just an empty message, update the heartbeats channel.
-	if args == (&AppendEntriesArgs{}) {
+	if len(args.Logs) == 0 {
 		DPrintf("Peer %d received a heartbeat.", rf.me)
 		rf.heartbeatCh <- struct{}{}
 		return
@@ -243,9 +232,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// False if log doesn't contain an entry at prevLogIndex whose term
 	// matches prevLogTerm
-	if args.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= len(rf.logs) {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("AppendEntries failed: log term at prevLogIndex (%d) does not match prevLogTerm (%d)", args.PrevLogIndex, args.PrevLogTerm)
-		reply.Term = args.Term
+		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
@@ -258,8 +253,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// replace them with the leader's logs
 		if entry != args.Logs[i] {
 			DPrintf("AppendEntries: log mismatch at index %d, replacing follower logs with leader logs", i)
-			newLogs := append(args.Logs[i:], rf.logs[i:]...)
-			args.Logs = newLogs
+			rf.logs = rf.logs[:i+args.PrevLogIndex]
+			rf.logs = append(rf.logs, args.Logs[i:]...)
 			break
 		}
 	}
@@ -442,6 +437,9 @@ func (rf *Raft) BecomeLeader() {
 		It then sends heartbeat messages to all of the other
 		servers to establish its authority and prevent new elections.
 	*/
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	DPrintf("Node %d is becoming the leader", rf.me)
 	rf.state = Leader
 	rf.votedFor = -1
