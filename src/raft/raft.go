@@ -230,14 +230,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// False if log doesn't contain an entry at prevLogIndex whose term
-	// matches prevLogTerm
+	// False if the log index is more than the one in the current peer
 	if args.PrevLogIndex >= len(rf.logs) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
+	// False if log doesn't contain an entry at prevLogIndex whose term
+	// matches prevLogTerm
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("AppendEntries failed: log term at prevLogIndex (%d) does not match prevLogTerm (%d)", args.PrevLogIndex, args.PrevLogTerm)
 		reply.Term = rf.currentTerm
@@ -251,9 +252,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range rf.logs {
 		// Found mismatch; delete all logs after i in the follower
 		// replace them with the leader's logs
-		if entry != args.Logs[i] {
+		if i >= len(args.Logs) || entry != args.Logs[i] {
 			DPrintf("AppendEntries: log mismatch at index %d, replacing follower logs with leader logs", i)
-			rf.logs = rf.logs[:i+args.PrevLogIndex]
+			rf.logs = rf.logs[:i]
 			rf.logs = append(rf.logs, args.Logs[i:]...)
 			break
 		}
