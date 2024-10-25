@@ -463,10 +463,8 @@ func (rf *Raft) StartElection() {
 		rf.mu.Unlock()
 		return
 	}
-	rf.mu.Unlock()
 
 	// Election tasks:
-	rf.mu.Lock()
 	rf.state = Candidate
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
