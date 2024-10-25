@@ -8,10 +8,6 @@ StartElection:
 - You check if rf.state != Candidate at the start, but then immediately set it to Candidate anyway
 - No election timer reset when starting new election
 - Votes counting might have race conditions since it's a local variable
-
-BecomeLeader:
-- Not properly initializing nextIndex and matchIndex arrays for all peers
-- Lock not held during state change
 */
 
 /*
@@ -273,6 +269,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	DPrintf("%d is being requested a vote", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -280,6 +277,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// If we're outdated, step down from candidate/leader and reset voting status
 	if args.Term > rf.currentTerm {
+		DPrintf("\t%d did not grant a vote to %d: term more than curr term, becoming follower\n", rf.me, args.CandidateId)
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = -1
@@ -287,6 +285,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	currTerm, _ := rf.GetState()
 	if args.Term < currTerm {
+		DPrintf("\t%d did not grant a vote to %d: term less than curr term\n", rf.me, args.CandidateId)
 		reply.Term = args.Term
 		reply.VoteGranted = false
 		return
@@ -298,9 +297,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogIndex := len(rf.logs) - 1
 	lastLogTerm := rf.logs[lastLogIndex].Term
 	if rf.votedFor == -1 || (rf.votedFor == args.CandidateId && args.LastLogIndex == lastLogIndex && args.LastLogTerm == lastLogTerm) {
+		DPrintf("\t%d granted a vote to %d\n", rf.me, args.CandidateId)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 	} else {
+		DPrintf("\t%d did not grant a vote to %d\n", rf.me, args.CandidateId)
 		reply.VoteGranted = false
 	}
 	reply.Term = lastLogTerm
@@ -420,14 +421,14 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// ms := 50 + (rand.Int63() % 300)
+		// time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
 func RandomizedDuration() time.Duration {
 	// random amount of time between 500 and 1000ms
-	randomDuration := 500 + (rand.Int63() % 1000)
+	randomDuration := 150 + (rand.Int63() % 300)
 	return time.Duration(randomDuration) * time.Millisecond
 }
 
@@ -438,13 +439,11 @@ func (rf *Raft) BecomeLeader() {
 		It then sends heartbeat messages to all of the other
 		servers to establish its authority and prevent new elections.
 	*/
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
+	rf.mu.Lock()
 	DPrintf("Node %d is becoming the leader", rf.me)
 	rf.state = Leader
 	rf.votedFor = -1
-
 	lenLogs := len(rf.logs)
 	for peer := range rf.peers {
 		if peer != rf.me {
@@ -452,30 +451,35 @@ func (rf *Raft) BecomeLeader() {
 			rf.matchIndex[peer] = 0
 		}
 	}
+	rf.mu.Unlock()
+
 	go rf.sendHeartbeats()
 }
 
 func (rf *Raft) StartElection() {
 	DPrintf("Starting elections...")
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	if rf.state != Candidate {
+	if rf.state == Leader {
+		rf.mu.Unlock()
 		return
 	}
+	rf.mu.Unlock()
 
 	// Election tasks:
+	rf.mu.Lock()
 	rf.state = Candidate
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
+	rf.mu.Unlock()
 
 	// 5. Request votes from all peers
 	// 5.1 Issue RequestVote RPCs in parallel to
 	// the other servers
 	// 5.2 We continue in this state until
 	// we win, someone else wins, time runs out
-	votes := 1
+	votes := make(chan bool, len(rf.peers))
 	if rf.killed() == false {
+		DPrintf("%d is requesting votes...", rf.me)
 		for peer := range rf.peers {
 			if peer == rf.me {
 				continue
@@ -490,17 +494,12 @@ func (rf *Raft) StartElection() {
 				reply := RequestVoteReply{}
 				if rf.sendRequestVote(peer, &args, &reply) {
 					rf.mu.Lock()
-					defer rf.mu.Unlock()
-
 					if rf.state != Candidate {
 						return
 					}
-
 					if reply.VoteGranted {
-						votes++
-						if votes > len(rf.peers)/2 && rf.state != Leader {
-							rf.BecomeLeader()
-						}
+						DPrintf("%d was granted a vote...", rf.me)
+						votes <- true
 						// If we didn't receive a vote, check if we're outdated
 						// if so, transition to Follower state.
 					} else if reply.Term > rf.currentTerm {
@@ -508,9 +507,34 @@ func (rf *Raft) StartElection() {
 						rf.state = Follower
 						rf.votedFor = -1
 					}
+					rf.mu.Unlock()
 				}
 			}(peer)
 		}
+
+		DPrintf("%d is counting votes...", rf.me)
+		tally := 1 // self vote
+		needed := (len(rf.peers) / 2) + 1
+		for i := 0; i < len(rf.peers)-1; i++ {
+			vote := <-votes
+			if vote {
+				tally++
+				if tally >= needed {
+					DPrintf("%d found the votes neeeded...", rf.me)
+					break
+				}
+			}
+			DPrintf("%d is counting...", rf.me)
+		}
+		DPrintf("%d is closing the channel", rf.me)
+		close(votes)
+
+		rf.mu.Lock()
+		if tally >= needed && rf.state != Leader {
+			DPrintf("%d is becoming a leader...", rf.me)
+			rf.BecomeLeader()
+		}
+		rf.mu.Unlock()
 	}
 }
 
