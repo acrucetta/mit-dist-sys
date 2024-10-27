@@ -1,11 +1,13 @@
 package raft
 
 /*
-Logs
-- Add greppable logs in parts of the process
+TODO:
+- [] learn about election timer
+- [] walk through new logic and verify with lecture notes
+- [] test the code and review missing pieces from claude feedback
+- [] watch raft video and walk through my logic, take notes
 
-StartElection:
-- No election timer reset when starting new election
+
 */
 
 /*
