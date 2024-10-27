@@ -1,13 +1,11 @@
 package raft
 
 /*
-TODO
+Logs
 - Add greppable logs in parts of the process
 
 StartElection:
-- You check if rf.state != Candidate at the start, but then immediately set it to Candidate anyway
 - No election timer reset when starting new election
-- Votes counting might have race conditions since it's a local variable
 */
 
 /*
@@ -201,7 +199,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("AppendEntries called with args: %+v", args)
+	DPrintf("[Node: %d][Term: %d] AppendEntries called with args: %+v", rf.me, rf.currentTerm, args)
 
 	// If we're outdated, step down from candidate/leader and reset voting status
 	if args.Term > rf.currentTerm {
@@ -212,7 +210,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// If its just an empty message, update the heartbeats channel.
 	if len(args.Logs) == 0 {
-		DPrintf("Peer %d received a heartbeat.", rf.me)
+		DPrintf("[Node: %d][Term: %d] Received a heartbeat.", rf.me, rf.currentTerm)
 		rf.heartbeatCh <- struct{}{}
 		return
 	}
@@ -220,7 +218,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// False if the requester's term is less than the current term
 	currTerm, _ := rf.GetState()
 	if args.Term < currTerm {
-		DPrintf("AppendEntries failed: args.Term (%d) < currTerm (%d)", args.Term, currTerm)
+		DPrintf("[Node: %d][Term: %d] AppendEntries failed: args.Term (%d) < currTerm (%d)", rf.me, rf.currentTerm, args.Term, currTerm)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -236,7 +234,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// False if log doesn't contain an entry at prevLogIndex whose term
 	// matches prevLogTerm
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		DPrintf("AppendEntries failed: log term at prevLogIndex (%d) does not match prevLogTerm (%d)", args.PrevLogIndex, args.PrevLogTerm)
+		DPrintf("[Node: %d][Term: %d] AppendEntries failed: log term at prevLogIndex (%d) does not match prevLogTerm (%d)", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -249,7 +247,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// Found mismatch; delete all logs after i in the follower
 		// replace them with the leader's logs
 		if i >= len(args.Logs) || entry != args.Logs[i] {
-			DPrintf("AppendEntries: log mismatch at index %d, replacing follower logs with leader logs", i)
+			DPrintf("[Node: %d][Term: %d] AppendEntries: log mismatch at index %d, replacing follower logs with leader logs", rf.me, rf.currentTerm, i)
 			rf.logs = rf.logs[:i]
 			rf.logs = append(rf.logs, args.Logs[i:]...)
 			break
@@ -258,26 +256,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex)
-		DPrintf("AppendEntries: updated commitIndex to %d", rf.commitIndex)
+		DPrintf("[Node: %d][Term: %d] AppendEntries: updated commitIndex to %d", rf.me, rf.currentTerm, rf.commitIndex)
 	}
 
 	reply.Term = args.Term
 	reply.Success = true
 
-	DPrintf("AppendEntries succeeded: reply: %+v", reply)
+	DPrintf("[Node: %d][Term: %d] AppendEntries succeeded: reply: %+v", rf.me, rf.currentTerm, reply)
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	DPrintf("%d is being requested a vote", rf.me)
+	DPrintf("[Node: %d][Term: %d] Node %d is being requested a vote", rf.me, rf.currentTerm, rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	// Your code here (3A, 3B).
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
 
 	// If we're outdated, step down from candidate/leader and reset voting status
 	if args.Term > rf.currentTerm {
-		DPrintf("\t%d did not grant a vote to %d: term more than curr term, becoming follower\n", rf.me, args.CandidateId)
+		DPrintf("\t[Node: %d][Term: %d] Node %d did not grant a vote to %d: request term (%d) more than curr term (%d), becoming follower\n", rf.me, rf.currentTerm, rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = -1
@@ -285,9 +285,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	currTerm, _ := rf.GetState()
 	if args.Term < currTerm {
-		DPrintf("\t%d did not grant a vote to %d: term less than curr term\n", rf.me, args.CandidateId)
-		reply.Term = args.Term
-		reply.VoteGranted = false
+		DPrintf("\t[Node: %d][Term: %d] Node %d did not grant a vote to %d: request term (%d) less than curr term (%d)\n", rf.me, rf.currentTerm, rf.me, args.CandidateId, args.Term, rf.currentTerm)
+		return
+	}
+
+	// Have que voted for someone else?
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		DPrintf("\t[Node: %d][Term: %d] Node %d voted alredy, did not grant a vote to %d\n", rf.me, rf.currentTerm, rf.me, args.CandidateId)
 		return
 	}
 
@@ -296,15 +300,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Check candidate's log
 	lastLogIndex := len(rf.logs) - 1
 	lastLogTerm := rf.logs[lastLogIndex].Term
-	if rf.votedFor == -1 || (rf.votedFor == args.CandidateId && args.LastLogIndex == lastLogIndex && args.LastLogTerm == lastLogTerm) {
-		DPrintf("\t%d granted a vote to %d\n", rf.me, args.CandidateId)
-		reply.VoteGranted = true
-		rf.votedFor = args.CandidateId
-	} else {
-		DPrintf("\t%d did not grant a vote to %d\n", rf.me, args.CandidateId)
-		reply.VoteGranted = false
+
+	if args.LastLogTerm < lastLogTerm ||
+		(args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
+		DPrintf("[Node: %d][Term: %d] Node %d rejected vote: candidate log not up to date",
+			rf.me, rf.currentTerm, rf.me)
+		return
 	}
-	reply.Term = lastLogTerm
+
+	DPrintf("[Node: %d][Term: %d] Node %d granting vote to %d", rf.me, rf.currentTerm, rf.me, args.CandidateId)
+	rf.votedFor = args.CandidateId
+	reply.VoteGranted = true
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -412,11 +418,17 @@ func (rf *Raft) ticker() {
 		timeout := time.After(RandomizedDuration())
 		select {
 		case <-rf.heartbeatCh:
-			// Peer received a heartbeat, reset the timeout duration
+			DPrintf("[Node: %d][Term: %d] Received heartbeat, resetting timeout", rf.me, rf.currentTerm)
 			timeout = time.After(RandomizedDuration())
 		case <-timeout:
-			// Timeout elapsed, run election
-			rf.StartElection()
+			rf.mu.Lock()
+			if rf.state != Leader {
+				DPrintf("[Node: %d][Term: %d] Election timeout, starting election", rf.me, rf.currentTerm)
+				rf.mu.Unlock()
+				rf.StartElection()
+			} else {
+				rf.mu.Unlock()
+			}
 		}
 
 		// pause for a random amount of time between 50 and 350
@@ -464,6 +476,11 @@ func (rf *Raft) StartElection() {
 		return
 	}
 
+	// Reset election timer
+	go func() {
+		rf.heartbeatCh <- struct{}{}
+	}()
+
 	// Election tasks:
 	rf.state = Candidate
 	rf.currentTerm += 1
@@ -477,7 +494,7 @@ func (rf *Raft) StartElection() {
 	// we win, someone else wins, time runs out
 	votes := make(chan bool, len(rf.peers))
 	if rf.killed() == false {
-		DPrintf("%d is requesting votes...", rf.me)
+		DPrintf("[Node: %d][Term: %d] Node %d is requesting votes...", rf.me, rf.currentTerm, rf.me)
 		for peer := range rf.peers {
 			if peer == rf.me {
 				continue
@@ -492,11 +509,12 @@ func (rf *Raft) StartElection() {
 				reply := RequestVoteReply{}
 				if rf.sendRequestVote(peer, &args, &reply) {
 					rf.mu.Lock()
+					defer rf.mu.Unlock()
 					if rf.state != Candidate {
 						return
 					}
 					if reply.VoteGranted {
-						DPrintf("%d was granted a vote...", rf.me)
+						DPrintf("[Node: %d][Term: %d] Node %d was granted a vote...", rf.me, rf.currentTerm, rf.me)
 						votes <- true
 						// If we didn't receive a vote, check if we're outdated
 						// if so, transition to Follower state.
@@ -504,13 +522,13 @@ func (rf *Raft) StartElection() {
 						rf.currentTerm = reply.Term
 						rf.state = Follower
 						rf.votedFor = -1
+						return
 					}
-					rf.mu.Unlock()
 				}
 			}(peer)
 		}
 
-		DPrintf("%d is counting votes...", rf.me)
+		DPrintf("[Node: %d][Term: %d] Node %d is counting votes...", rf.me, rf.currentTerm, rf.me)
 		tally := 1 // self vote
 		needed := (len(rf.peers) / 2) + 1
 		for i := 0; i < len(rf.peers)-1; i++ {
@@ -518,18 +536,18 @@ func (rf *Raft) StartElection() {
 			if vote {
 				tally++
 				if tally >= needed {
-					DPrintf("%d found the votes neeeded...", rf.me)
+					DPrintf("[Node: %d][Term: %d] Node %d found the votes neeeded...", rf.me, rf.currentTerm, rf.me)
 					break
 				}
 			}
 			DPrintf("%d is counting...", rf.me)
 		}
-		DPrintf("%d is closing the channel", rf.me)
+		DPrintf("[Node: %d][Term: %d] Node %d is closing the channel", rf.me, rf.currentTerm, rf.me)
 		close(votes)
 
 		rf.mu.Lock()
 		if tally >= needed && rf.state != Leader {
-			DPrintf("%d is becoming a leader...", rf.me)
+			DPrintf("[Node: %d][Term: %d] Node %d is becoming a leader...", rf.me, rf.currentTerm, rf.me)
 			rf.BecomeLeader()
 		}
 		rf.mu.Unlock()
