@@ -249,14 +249,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 	}
 
-	// If its just an empty message, update the heartbeats channel.
-	if len(args.Logs) == 0 {
-		DPrintf("%s[%s][Node %d][Term %d] Received heartbeat%s",
-			colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
-		rf.heartbeatCh <- struct{}{}
-		return
-	}
-
 	// False if the requester's term is less than the current term
 	currTerm, _ := rf.GetState()
 	if args.Term < currTerm {
@@ -266,6 +258,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+
+	// Valid RPC (i.e., current term is up to date)
+	rf.heartbeatCh <- struct{}{}
 
 	// False if the log index is more than the one in the current peer
 	if args.PrevLogIndex >= len(rf.logs) {
@@ -493,14 +488,22 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatCh:
 			DPrintf("%s[%s][Node %d][Term %d] Received heartbeat, resetting timeout%s",
 				colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
-			timeout = time.After(RandomizedDuration())
+			// Reset timer only if still follower/candidate
+			rf.mu.Lock()
+			if rf.state != Leader {
+				timeout = time.After(RandomizedDuration())
+			}
+			rf.mu.Unlock()
 		case <-timeout:
 			rf.mu.Lock()
 			if rf.state != Leader {
-				DPrintf("%s[%s][Node %d][Term %d] Election timeout, starting election%s",
-					colorYellow, rf.state, rf.me, rf.currentTerm, colorReset)
+				// Become candidate under lock
+				rf.state = Candidate
+				rf.currentTerm += 1
+				rf.votedFor = rf.me
 				rf.mu.Unlock()
-				rf.StartElection()
+				// Start election outside lock
+				go rf.StartElection()
 			} else {
 				rf.mu.Unlock()
 			}
@@ -658,6 +661,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]LogEntry, 1)
+	rf.logs[0] = LogEntry{Term: 0} // dummy entry
+
 	rf.state = Follower
 
 	rf.commitIndex = 1
