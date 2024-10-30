@@ -28,6 +28,12 @@ const (
 )
 
 /*
+TODO:
+- [] Debug the remaining cases, make sense of the new structure; compare with the paper
+- [] ...
+*/
+
+/*
 Raft Properties:
 - Election Safety: at most one leader can be elected in a given term. §5.2
 - Leader Append-Only: a leader never overwrites or deletes entries in its log; it only appends new entries. §5.3
@@ -489,8 +495,13 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		select {
 		case <-rf.electionTimer.C:
+			rf.mu.Lock()
 			if rf.state != Leader {
+				rf.mu.Unlock()
 				go rf.startElection()
+			} else {
+				rf.resetElectionTimer()
+				rf.mu.Unlock()
 			}
 		}
 	}
