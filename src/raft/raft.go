@@ -28,12 +28,6 @@ const (
 )
 
 /*
-TODO:
-- [] Debug the remaining cases, make sense of the new structure; compare with the paper
-- [] ...
-*/
-
-/*
 Raft Properties:
 - Election Safety: at most one leader can be elected in a given term. §5.2
 - Leader Append-Only: a leader never overwrites or deletes entries in its log; it only appends new entries. §5.3
@@ -440,6 +434,8 @@ func (rf *Raft) startElection() {
 	needed := len(rf.peers)/2 + 1
 	responses := make(chan bool, len(rf.peers)-1)
 
+	timeout := time.After(time.Duration(ELECTION_TIMEOUT_MAX) * time.Millisecond)
+
 	// Send vote request to all the peers
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -472,15 +468,30 @@ func (rf *Raft) startElection() {
 	// Count the votes
 	go func() {
 		for i := 0; i < len(rf.peers)-1; i++ {
-			if <-responses {
-				votes++
-				if votes >= needed {
-					rf.mu.Lock()
-					DPrintf("%s[%s][Node %d][Term %d] Won election with %d/%d votes%s",
-						colorGreen, rf.state, rf.me, rf.currentTerm, votes, len(rf.peers), colorReset)
-					rf.becomeLeader()
-					rf.mu.Unlock()
-					return
+			select {
+			case <-timeout:
+				rf.mu.Lock()
+				if rf.state == Candidate && rf.currentTerm == args.Term {
+					DPrintf("%s[%s][Node %d][Term %d] Election timed out with %d/%d votes%s",
+						colorRed, rf.state, rf.me, rf.currentTerm, votes, len(rf.peers), colorReset)
+					rf.becomeFollower(rf.currentTerm) // Stay in same term
+				}
+				rf.mu.Unlock()
+				return
+			case voteGranted := <-responses:
+				if voteGranted {
+					votes++
+					if votes >= needed {
+						rf.mu.Lock()
+						if rf.state == Candidate && rf.currentTerm == args.Term {
+							DPrintf("%s[%s][Node %d][Term %d] Won election with %d/%d votes%s",
+								colorGreen, rf.state, rf.me, rf.currentTerm, votes, len(rf.peers), colorReset)
+							rf.becomeLeader()
+						}
+						rf.mu.Unlock()
+						electionDone <- true
+						return
+					}
 				}
 			}
 		}
