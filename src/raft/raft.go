@@ -11,8 +11,8 @@ import (
 
 // Constants for better readability
 const (
-	ELECTION_TIMEOUT_MIN = 150 // milliseconds
-	ELECTION_TIMEOUT_MAX = 300 // milliseconds
+	ELECTION_TIMEOUT_MIN = 300 // milliseconds
+	ELECTION_TIMEOUT_MAX = 600 // milliseconds
 	HEARTBEAT_INTERVAL   = 100 // milliseconds
 )
 
@@ -488,8 +488,8 @@ func (rf *Raft) startElection() {
 				if rf.state == Candidate && rf.currentTerm == args.Term {
 					DPrintf("%s[%s][Node %d][Term %d] Election timeout. Starting new election",
 						colorGreen, rf.state, rf.me, rf.currentTerm)
-					rf.currentTerm++
-					go rf.startElection()
+					// rf.currentTerm++
+					// go rf.startElection()
 				}
 				rf.mu.Unlock()
 				return
@@ -500,7 +500,7 @@ func (rf *Raft) startElection() {
 	}()
 }
 
-// The ticker go routine starts a new election if this peer hasn't received
+// The ticker go routine starts a new election if this peer hasnTest (3A): election after network failure ...'t received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for !rf.killed() {
@@ -520,18 +520,19 @@ func (rf *Raft) ticker() {
 
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:       peers,
-		persister:   persister,
-		me:          me,
-		applyCh:     applyCh,
-		currentTerm: 0,
-		votedFor:    -1,
-		log:         []LogEntry{{Term: 0}}, // Initialize with dummy entry
-		state:       Follower,
-		commitIndex: 0,
-		lastApplied: 0,
-		nextIndex:   make([]int, len(peers)),
-		matchIndex:  make([]int, len(peers)),
+		peers:         peers,
+		persister:     persister,
+		me:            me,
+		applyCh:       applyCh,
+		currentTerm:   0,
+		votedFor:      -1,
+		log:           []LogEntry{{Term: 0}}, // Initialize with dummy entry
+		state:         Follower,
+		commitIndex:   0,
+		lastApplied:   0,
+		nextIndex:     make([]int, len(peers)),
+		matchIndex:    make([]int, len(peers)),
+		electionTimer: time.NewTimer(time.Duration(ELECTION_TIMEOUT_MIN) * time.Millisecond),
 	}
 
 	// initialize from state persisted before a crash

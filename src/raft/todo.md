@@ -1,15 +1,4 @@
 
-Hints
-- [] Modify Make() to create a background go-routine that will kick off leader
-election periodically by sending RequestVote RPCs when it hasn't heard from another
-peer for a while.
-- [] The tester requires that the leader sends heartbeat RPCs not more than 10x/second
-- [] Implement GetState()
-
-Debugging
-- [] Add debugging to each component
-
-
 Start Election
 • On conversion to candidate, start election:
     • Increment currentTerm
@@ -27,3 +16,21 @@ Request Votes
 
 Append Entries
 
+---
+
+The TestReElection3A test specifically checks:
+- If leader disconnects, new one is elected
+- If old leader rejoins, it becomes follower and doesn't disturb new leader
+- Without quorum, no leader should be elected
+- When quorum restored, leader should be elected
+
+Focus on making sure your timeouts, term management, and state transitions handle all these cases correctly.
+
+TestReElection3A
+
+Key things to implement:
+- When a server discovers current leader is disconnected (misses heartbeats), it should start election
+- Only start election if you're not already a leader
+- When old leader reconnects, it should notice higher term and step down
+- Without quorum (majority), no server should become leader
+- Server should revert to follower when it sees higher term
