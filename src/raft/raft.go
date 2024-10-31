@@ -469,15 +469,6 @@ func (rf *Raft) startElection() {
 	go func() {
 		for i := 0; i < len(rf.peers)-1; i++ {
 			select {
-			case <-timeout:
-				rf.mu.Lock()
-				if rf.state == Candidate && rf.currentTerm == args.Term {
-					DPrintf("%s[%s][Node %d][Term %d] Election timed out with %d/%d votes%s",
-						colorRed, rf.state, rf.me, rf.currentTerm, votes, len(rf.peers), colorReset)
-					rf.becomeFollower(rf.currentTerm) // Stay in same term
-				}
-				rf.mu.Unlock()
-				return
 			case voteGranted := <-responses:
 				if voteGranted {
 					votes++
@@ -489,10 +480,19 @@ func (rf *Raft) startElection() {
 							rf.becomeLeader()
 						}
 						rf.mu.Unlock()
-						electionDone <- true
 						return
 					}
 				}
+			case <-timeout:
+				rf.mu.Lock()
+				if rf.state == Candidate && rf.currentTerm == args.Term {
+					DPrintf("%s[%s][Node %d][Term %d] Election timeout. Starting new election",
+						colorGreen, rf.state, rf.me, rf.currentTerm)
+					rf.currentTerm++
+					go rf.startElection()
+				}
+				rf.mu.Unlock()
+				return
 			}
 		}
 		DPrintf("%s[%s][Node %d][Term %d] Lost election: only got %d/%d votes%s",
