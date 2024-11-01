@@ -18,14 +18,6 @@ Append Entries
 
 ---
 
-The TestReElection3A test specifically checks:
-- If leader disconnects, new one is elected
-- If old leader rejoins, it becomes follower and doesn't disturb new leader
-- Without quorum, no leader should be elected
-- When quorum restored, leader should be elected
-
-Focus on making sure your timeouts, term management, and state transitions handle all these cases correctly.
-
 TestReElection3A
 
 Key things to implement:
@@ -34,3 +26,5 @@ Key things to implement:
 - When old leader reconnects, it should notice higher term and step down
 - Without quorum (majority), no server should become leader
 - Server should revert to follower when it sees higher term
+
+Focus on making sure your timeouts, term management, and state transitions handle all these cases correctly.

@@ -163,6 +163,8 @@ func (rf *Raft) becomeLeader() {
 		rf.matchIndex[i] = 0
 	}
 
+	// TODO: Stop the election timer here?
+
 	go rf.sendHeartbeats()
 }
 
@@ -282,13 +284,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	rf.resetElectionTimer()
+
 	if args.Term > rf.currentTerm {
 		DPrintf("%s[%s][Node %d][Term %d] Converting to follower: leader term (%d) > current term (%d)%s",
 			colorYellow, rf.state, rf.me, rf.currentTerm, args.Term, rf.currentTerm, colorReset)
 		rf.becomeFollower(args.Term)
 	}
-
-	rf.resetElectionTimer()
 
 	if args.PrevLogIndex >= len(rf.log) ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
@@ -432,9 +434,6 @@ func (rf *Raft) startElection() {
 
 	votes := 1 // Vote for self
 	needed := len(rf.peers)/2 + 1
-	responses := make(chan bool, len(rf.peers)-1)
-
-	timeout := time.After(time.Duration(ELECTION_TIMEOUT_MAX) * time.Millisecond)
 
 	// Send vote request to all the peers
 	for peer := range rf.peers {
@@ -450,54 +449,18 @@ func (rf *Raft) startElection() {
 						colorRed, rf.state, rf.me, rf.currentTerm, peer, colorReset)
 					rf.becomeFollower(reply.Term)
 					rf.mu.Unlock()
-					responses <- false
 					return
 				}
 				rf.mu.Unlock()
-				responses <- reply.VoteGranted
 				if reply.VoteGranted {
-					DPrintf("%s[%s][Node %d][Term %d] Received vote from peer %d%s",
-						colorGreen, rf.state, rf.me, rf.currentTerm, peer, colorReset)
+					votes++
+					if votes > needed {
+						rf.becomeLeader()
+					}
 				}
-			} else {
-				responses <- false
 			}
 		}(peer)
 	}
-
-	// Count the votes
-	go func() {
-		for i := 0; i < len(rf.peers)-1; i++ {
-			select {
-			case voteGranted := <-responses:
-				if voteGranted {
-					votes++
-					if votes >= needed {
-						rf.mu.Lock()
-						if rf.state == Candidate && rf.currentTerm == args.Term {
-							DPrintf("%s[%s][Node %d][Term %d] Won election with %d/%d votes%s",
-								colorGreen, rf.state, rf.me, rf.currentTerm, votes, len(rf.peers), colorReset)
-							rf.becomeLeader()
-						}
-						rf.mu.Unlock()
-						return
-					}
-				}
-			case <-timeout:
-				rf.mu.Lock()
-				if rf.state == Candidate && rf.currentTerm == args.Term {
-					DPrintf("%s[%s][Node %d][Term %d] Election timeout. Starting new election",
-						colorGreen, rf.state, rf.me, rf.currentTerm)
-					// rf.currentTerm++
-					// go rf.startElection()
-				}
-				rf.mu.Unlock()
-				return
-			}
-		}
-		DPrintf("%s[%s][Node %d][Term %d] Lost election: only got %d/%d votes%s",
-			colorRed, rf.state, rf.me, rf.currentTerm, votes, len(rf.peers), colorReset)
-	}()
 }
 
 // The ticker go routine starts a new election if this peer hasnTest (3A): election after network failure ...'t received
@@ -508,12 +471,9 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
 			if rf.state != Leader {
-				rf.mu.Unlock()
 				go rf.startElection()
-			} else {
-				rf.resetElectionTimer()
-				rf.mu.Unlock()
 			}
+			rf.mu.Unlock()
 		}
 	}
 }
