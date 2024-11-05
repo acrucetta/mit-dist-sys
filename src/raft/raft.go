@@ -28,6 +28,21 @@ const (
 )
 
 /*
+References:
+- https://thesquareplanet.com/blog/students-guide-to-raft/#the-importance-of-details
+- https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/
+*/
+
+/*
+Debugging questions:
+- [x] Are you properly resetting election timers when receiving valid AppendEntries?
+- [x] Is your heartbeat interval appropriate (100ms)?
+- Are you handling term changes correctly?
+	- We change terms when we receive an RPC request that contains a more recent term than our current one
+	we set currentTerm = T
+- Are election timeouts properly randomized?
+- Are you maintaining proper locking around state changes?
+
 Raft Properties:
 - Election Safety: at most one leader can be elected in a given term. §5.2
 - Leader Append-Only: a leader never overwrites or deletes entries in its log; it only appends new entries. §5.3
@@ -113,9 +128,9 @@ type Raft struct {
 	matchIndex []int
 
 	// Channels for coordination
-	electionTimer  *time.Timer
-	heartbeatTimer *time.Timer
-	applyCh        chan ApplyMsg
+	electionTimer     *time.Timer
+	lastElectionReset time.Time
+	applyCh           chan ApplyMsg
 }
 
 // -- Helper Functions --
@@ -126,6 +141,12 @@ func (rf *Raft) resetElectionTimer() {
 	}
 	timeout := ELECTION_TIMEOUT_MIN + rand.Intn(ELECTION_TIMEOUT_MAX-ELECTION_TIMEOUT_MIN)
 	rf.electionTimer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
+	rf.lastElectionReset = time.Now()
+}
+
+func (rf *Raft) logTimerState() {
+	elapsed := time.Since(rf.lastElectionReset).Milliseconds()
+	DPrintf("%sNode %d timer elapsed: %dms since last reset%s", colorCyan, rf.me, elapsed, colorReset)
 }
 
 func (rf *Raft) becomeFollower(term int) {
@@ -163,7 +184,9 @@ func (rf *Raft) becomeLeader() {
 		rf.matchIndex[i] = 0
 	}
 
-	// TODO: Stop the election timer here?
+	if rf.electionTimer != nil {
+		rf.electionTimer.Stop()
+	}
 
 	go rf.sendHeartbeats()
 }
@@ -228,9 +251,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 
+	// Reply false if term < currentTerm (§5.1)
+	if args.Term < rf.currentTerm {
+		DPrintf("%s[%s][Node %d][Term %d] Rejected AppendEntries: term too old%s",
+			colorRed, rf.state, rf.me, rf.currentTerm, colorReset)
+		return
+	}
+
+	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
-		DPrintf("%s[%s][Node %d][Term %d] Stepping down: request term (%d) > current term (%d)%s",
-			colorRed, rf.state, rf.me, rf.currentTerm, args.Term, rf.currentTerm, colorReset)
+		DPrintf("%s[%s][Node %d][Term %d] Converting to follower: leader term (%d) > current term (%d)%s",
+			colorYellow, rf.state, rf.me, rf.currentTerm, args.Term, rf.currentTerm, colorReset)
 		rf.becomeFollower(args.Term)
 	}
 
@@ -278,6 +309,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 
+	// Reply false if term < currentTerm (§5.1)
 	if args.Term < rf.currentTerm {
 		DPrintf("%s[%s][Node %d][Term %d] Rejected AppendEntries: term too old%s",
 			colorRed, rf.state, rf.me, rf.currentTerm, colorReset)
@@ -286,12 +318,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.resetElectionTimer()
 
+	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
 		DPrintf("%s[%s][Node %d][Term %d] Converting to follower: leader term (%d) > current term (%d)%s",
 			colorYellow, rf.state, rf.me, rf.currentTerm, args.Term, rf.currentTerm, colorReset)
 		rf.becomeFollower(args.Term)
 	}
 
+	// Reply false if log doesn’t contain an entry at prevLogIndex
+	// whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex >= len(rf.log) ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("%s[%s][Node %d][Term %d] Log consistency check failed%s",
@@ -299,6 +334,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	// 1. If an existing entry conflicts with a new one (same index
+	// but different terms), delete the existing entry and all that
+	// follow it (§5.3)
+	// 2. Append any new entries not already in the log
 	if len(args.Entries) > 0 {
 		DPrintf("%s[%s][Node %d][Term %d] Appending %d entries to log%s",
 			colorCyan, rf.state, rf.me, rf.currentTerm, len(args.Entries), colorReset)
@@ -306,6 +345,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = append(rf.log[:args.PrevLogIndex+1], newEntries...)
 	}
 
+	// If leaderCommit > commitIndex, set commitIndex =
+	// min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		oldCommitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
@@ -337,6 +378,7 @@ func (rf *Raft) sendHeartbeats() {
 
 		DPrintf("%s[%s][Node %d][Term %d] Sending heartbeats to all peers%s",
 			colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
+		rf.logTimerState()
 
 		for peer := range rf.peers {
 			if peer == rf.me {
@@ -463,7 +505,7 @@ func (rf *Raft) startElection() {
 	}
 }
 
-// The ticker go routine starts a new election if this peer hasnTest (3A): election after network failure ...'t received
+// The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for !rf.killed() {
