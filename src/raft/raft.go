@@ -35,13 +35,8 @@ References:
 
 /*
 Debugging questions:
-- [x] Are you properly resetting election timers when receiving valid AppendEntries?
-- [x] Is your heartbeat interval appropriate (100ms)?
-- Are you handling term changes correctly?
-	- We change terms when we receive an RPC request that contains a more recent term than our current one
-	we set currentTerm = T
-- Are election timeouts properly randomized?
-- Are you maintaining proper locking around state changes?
+- The key problem seems to be that your election timeouts aren't being triggered properly when the leader is disconnected.
+The followers should timeout and start new elections, but they're not.
 
 Raft Properties:
 - Election Safety: at most one leader can be elected in a given term. §5.2
@@ -138,10 +133,15 @@ type Raft struct {
 func (rf *Raft) resetElectionTimer() {
 	if rf.electionTimer != nil {
 		rf.electionTimer.Stop()
+		select {
+		case <-rf.electionTimer.C:
+		default:
+		}
 	}
 	timeout := ELECTION_TIMEOUT_MIN + rand.Intn(ELECTION_TIMEOUT_MAX-ELECTION_TIMEOUT_MIN)
 	rf.electionTimer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
 	rf.lastElectionReset = time.Now()
+	DPrintf("Node %d resetting election timer with timeout %dms", rf.me, timeout)
 }
 
 func (rf *Raft) logTimerState() {
@@ -161,6 +161,9 @@ func (rf *Raft) becomeFollower(term int) {
 func (rf *Raft) becomeCandidate() {
 	DPrintf("%s[%s][Node %d][Term %d] Converting to Candidate%s",
 		getStateColor(rf.state), rf.state, rf.me, rf.currentTerm, colorReset)
+
+	// Candidates (§5.2):
+	// On conversion to candidate, start election:
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
@@ -186,6 +189,10 @@ func (rf *Raft) becomeLeader() {
 
 	if rf.electionTimer != nil {
 		rf.electionTimer.Stop()
+		select {
+		case <-rf.electionTimer.C:
+		default:
+		}
 	}
 
 	go rf.sendHeartbeats()
@@ -273,6 +280,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	logIsUpToDate := args.LastLogTerm > lastLogTerm ||
 		(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
 
+	// If votedFor is null or candidateId, and candidates log is at
+	// least as up-to-date as receivers log, grant vote (§5.2, §5.4)
 	if canVote && logIsUpToDate {
 		DPrintf("%s[%s][Node %d][Term %d] Granting vote to Node %d%s",
 			colorGreen, rf.state, rf.me, rf.currentTerm, args.CandidateId, colorReset)
@@ -325,7 +334,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.becomeFollower(args.Term)
 	}
 
-	// Reply false if log doesn’t contain an entry at prevLogIndex
+	// Reply false if log doesnt contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex >= len(rf.log) ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
@@ -367,7 +376,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-// Function to send periodical heartbeats
+// Function to send periodical heartbeats with no log entries
 func (rf *Raft) sendHeartbeats() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -385,12 +394,14 @@ func (rf *Raft) sendHeartbeats() {
 				continue
 			}
 
+			// Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server;
+			// repeat during idle periods to prevent election timeouts (§5.2)
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				PrevLogIndex: rf.nextIndex[peer] - 1,
 				PrevLogTerm:  rf.log[rf.nextIndex[peer]-1].Term,
-				Entries:      rf.log[rf.nextIndex[peer]:],
+				Entries:      []LogEntry{},
 				LeaderCommit: rf.commitIndex,
 			}
 
@@ -407,11 +418,15 @@ func (rf *Raft) sendHeartbeats() {
 						return
 					}
 
+					// If successful: update nextIndex and matchIndex for follower (§5.3)
 					if reply.Success {
 						rf.nextIndex[peer] = len(rf.log)
 						rf.matchIndex[peer] = rf.nextIndex[peer] - 1
 						DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
 							colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
+
+						// If AppendEntries fails because of log inconsistency:
+						// decrement nextIndex and retry (§5.3)
 					} else {
 						rf.nextIndex[peer]--
 						DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
@@ -475,6 +490,7 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 
 	votes := 1 // Vote for self
+	voteMutex := sync.Mutex{}
 	needed := len(rf.peers)/2 + 1
 
 	// Send vote request to all the peers
@@ -495,8 +511,11 @@ func (rf *Raft) startElection() {
 				}
 				rf.mu.Unlock()
 				if reply.VoteGranted {
+					voteMutex.Lock()
 					votes++
-					if votes > needed {
+					currVotes := votes
+					voteMutex.Unlock()
+					if currVotes > needed {
 						rf.becomeLeader()
 					}
 				}
@@ -509,14 +528,13 @@ func (rf *Raft) startElection() {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for !rf.killed() {
-		select {
-		case <-rf.electionTimer.C:
-			rf.mu.Lock()
-			if rf.state != Leader {
-				go rf.startElection()
-			}
-			rf.mu.Unlock()
+		<-rf.electionTimer.C
+		rf.mu.Lock()
+		if rf.state != Leader {
+			go rf.startElection()
 		}
+		rf.mu.Unlock()
+		rf.resetElectionTimer()
 	}
 }
 
