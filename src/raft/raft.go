@@ -35,8 +35,9 @@ References:
 
 /*
 Debugging questions:
-- The key problem seems to be that your election timeouts aren't being triggered properly when the leader is disconnected.
-The followers should timeout and start new elections, but they're not.
+- The key problem seems to be that your election timeouts aren't being triggered
+properly when the leader is disconnected. The followers should
+timeout and start new elections, but they're not.
 
 Raft Properties:
 - Election Safety: at most one leader can be elected in a given term. §5.2
@@ -265,7 +266,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+	// If RPC request or response contains term T > currentTerm: set
+	// currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
 		DPrintf("%s[%s][Node %d][Term %d] Converting to follower: leader term (%d) > current term (%d)%s",
 			colorYellow, rf.state, rf.me, rf.currentTerm, args.Term, rf.currentTerm, colorReset)
@@ -407,31 +409,37 @@ func (rf *Raft) sendHeartbeats() {
 
 			go func(peer int, args AppendEntriesArgs) {
 				reply := AppendEntriesReply{}
-				if rf.sendAppendEntries(peer, &args, &reply) {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
+				ok := rf.sendAppendEntries(peer, &args, &reply)
 
-					if reply.Term > rf.currentTerm {
-						DPrintf("%s[%s][Node %d][Term %d] Stepping down: peer %d has higher term %d%s",
-							colorRed, rf.state, rf.me, rf.currentTerm, peer, reply.Term, colorReset)
-						rf.becomeFollower(reply.Term)
-						return
-					}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 
-					// If successful: update nextIndex and matchIndex for follower (§5.3)
-					if reply.Success {
-						rf.nextIndex[peer] = len(rf.log)
-						rf.matchIndex[peer] = rf.nextIndex[peer] - 1
-						DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
-							colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
+				if !ok {
+					DPrintf("%s[%s][Node %d][Term %d] Failed to send a heartbeat to the peer %d, retrying...%s",
+						colorRed, rf.state, rf.me, rf.currentTerm, peer, colorReset)
+					return
+				}
 
-						// If AppendEntries fails because of log inconsistency:
-						// decrement nextIndex and retry (§5.3)
-					} else {
-						rf.nextIndex[peer]--
-						DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
-							colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
-					}
+				if reply.Term > rf.currentTerm {
+					DPrintf("%s[%s][Node %d][Term %d] Stepping down: peer %d has higher term %d%s",
+						colorRed, rf.state, rf.me, rf.currentTerm, peer, reply.Term, colorReset)
+					rf.becomeFollower(reply.Term)
+					return
+				}
+
+				// If successful: update nextIndex and matchIndex for follower (§5.3)
+				if reply.Success {
+					rf.nextIndex[peer] = len(rf.log)
+					rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+					DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
+						colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
+
+					// If AppendEntries fails because of log inconsistency:
+					// decrement nextIndex and retry (§5.3)
+				} else {
+					rf.nextIndex[peer]--
+					DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
+						colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
 				}
 			}(peer, args)
 		}
@@ -525,16 +533,18 @@ func (rf *Raft) startElection() {
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
-// heartsbeats recently.
+// heartbeats recently.
 func (rf *Raft) ticker() {
 	for !rf.killed() {
+		// TODO: Followers are not resetting properly when the leader disconnects,
+		// one of them should become the leader.
 		<-rf.electionTimer.C
 		rf.mu.Lock()
 		if rf.state != Leader {
 			go rf.startElection()
+			rf.resetElectionTimer()
 		}
 		rf.mu.Unlock()
-		rf.resetElectionTimer()
 	}
 }
 
