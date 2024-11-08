@@ -132,15 +132,14 @@ type Raft struct {
 // -- Helper Functions --
 
 func (rf *Raft) resetElectionTimer() {
-	if rf.electionTimer != nil {
-		rf.electionTimer.Stop()
+	if rf.electionTimer.Stop() {
 		select {
 		case <-rf.electionTimer.C:
 		default:
 		}
 	}
 	timeout := ELECTION_TIMEOUT_MIN + rand.Intn(ELECTION_TIMEOUT_MAX-ELECTION_TIMEOUT_MIN)
-	rf.electionTimer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
+	rf.electionTimer.Reset(time.Duration(timeout) * time.Millisecond)
 	rf.lastElectionReset = time.Now()
 	DPrintf("Node %d resetting election timer with timeout %dms", rf.me, timeout)
 }
@@ -172,14 +171,12 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeLeader() {
-	if rf.state != Candidate {
-		return
-	}
-
 	DPrintf("%s[%s][Node %d][Term %d] Converting to Leader%s",
 		colorGreen, rf.state, rf.me, rf.currentTerm, colorReset)
 
 	rf.state = Leader
+	rf.resetElectionTimer()
+
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
@@ -195,6 +192,8 @@ func (rf *Raft) becomeLeader() {
 		default:
 		}
 	}
+
+	// Send initial append entries
 
 	go rf.sendHeartbeats()
 }
@@ -495,10 +494,12 @@ func (rf *Raft) startElection() {
 	DPrintf("%s[%s][Node %d][Term %d] Starting election%s",
 		colorYellow, rf.state, rf.me, rf.currentTerm, colorReset)
 
+	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
 
 	votes := 1 // Vote for self
 	voteMutex := sync.Mutex{}
+	finished := false
 	needed := len(rf.peers)/2 + 1
 
 	// Send vote request to all the peers
@@ -510,20 +511,27 @@ func (rf *Raft) startElection() {
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(peer, &args, &reply) {
 				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				if finished || rf.state != Candidate || rf.currentTerm != currentTerm {
+					return
+				}
+
 				if reply.Term > rf.currentTerm {
 					DPrintf("%s[%s][Node %d][Term %d] Discovered higher term from peer %d, stepping down%s",
 						colorRed, rf.state, rf.me, rf.currentTerm, peer, colorReset)
 					rf.becomeFollower(reply.Term)
-					rf.mu.Unlock()
+					finished = true
 					return
 				}
-				rf.mu.Unlock()
+
 				if reply.VoteGranted {
 					voteMutex.Lock()
 					votes++
 					currVotes := votes
 					voteMutex.Unlock()
-					if currVotes > needed {
+					if currVotes >= needed && !finished {
+						finished = true
 						rf.becomeLeader()
 					}
 				}
@@ -540,9 +548,13 @@ func (rf *Raft) ticker() {
 		// one of them should become the leader.
 		<-rf.electionTimer.C
 		rf.mu.Lock()
+		rf.resetElectionTimer()
 		if rf.state != Leader {
+			DPrintf("%s[%s][Node %d][Term %d] Starting a new election... %s",
+				colorRed, rf.state, rf.me, rf.currentTerm, colorReset)
 			go rf.startElection()
-			rf.resetElectionTimer()
+			DPrintf("%s[%s][Node %d][Term %d] Resetting the election timer... %s",
+				colorRed, rf.state, rf.me, rf.currentTerm, colorReset)
 		}
 		rf.mu.Unlock()
 	}
@@ -567,7 +579,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 	rf.resetElectionTimer()
 	go rf.ticker()
 
