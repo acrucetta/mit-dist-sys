@@ -109,18 +109,21 @@ type Raft struct {
 	me        int
 	dead      int32
 
-	// Persistent state
+	// Persistent state on all servers
 	currentTerm int
 	votedFor    int
 	log         []LogEntry
 	state       ServerState
 
-	// Volatile state
+	// Volatile state on all servers
 	commitIndex int
 	lastApplied int
 
-	// Leader state
-	nextIndex  []int
+	// Volatile state on leaders
+	// For each server, index of the next log entry to send to that server
+	nextIndex []int
+	// For each server, index of highest log entry known to
+	// be replicated on server
 	matchIndex []int
 
 	// Channels for coordination
@@ -379,6 +382,84 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+// Function to replicate log entries
+func (rf *Raft) replicateLog() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
+		DPrintf("%s[%s][Node %d][Term %d] Replicating log entries...%s",
+			colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
+
+		for peer := range rf.peers {
+			if peer == rf.me {
+				continue
+			}
+
+			// If last log index ≥ nextIndex for a follower: send
+			// AppendEntries RPC with log entries starting at nextIndex
+			entries := []LogEntry{}
+			if len(rf.log) > rf.nextIndex[peer] {
+				entries = rf.log[rf.nextIndex[peer]:]
+			}
+
+			args := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: rf.nextIndex[peer] - 1,
+				PrevLogTerm:  rf.log[rf.nextIndex[peer]-1].Term,
+				Entries:      entries,
+				LeaderCommit: rf.commitIndex,
+			}
+
+			go func(peer int, args AppendEntriesArgs) {
+				reply := AppendEntriesReply{}
+				ok := rf.sendAppendEntries(peer, &args, &reply)
+
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				if !ok || rf.state != Leader {
+					DPrintf("%s[%s][Node %d][Term %d] Failed to send append entry to the peer %d, retrying...%s",
+						colorRed, rf.state, rf.me, rf.currentTerm, peer, colorReset)
+					return
+				}
+
+				if reply.Term > rf.currentTerm {
+					DPrintf("%s[%s][Node %d][Term %d] Stepping down: peer %d has higher term %d%s",
+						colorRed, rf.state, rf.me, rf.currentTerm, peer, reply.Term, colorReset)
+					rf.becomeFollower(reply.Term)
+					return
+				}
+
+				// If successful: update nextIndex and matchIndex for follower (§5.3)
+				if reply.Success {
+					rf.nextIndex[peer] = len(rf.log)
+					rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+					DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
+						colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
+
+					// TODO: If command received from client: append entry to local log,
+					// respond after entry applied to state machine (§5.3)
+					// TODO: If there exists an N such that N > commitIndex, a majority
+					// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+					// set commitIndex = N (§5.3, §5.4).
+
+					// If AppendEntries fails because of log inconsistency:
+					// decrement nextIndex and retry (§5.3)
+				} else {
+					rf.nextIndex[peer]--
+					DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
+						colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
+				}
+			}(peer, args)
+		}
+		rf.mu.Unlock()
+	}
+}
+
 // Function to send periodical heartbeats with no log entries
 func (rf *Raft) sendHeartbeats() {
 	for !rf.killed() {
@@ -387,18 +468,6 @@ func (rf *Raft) sendHeartbeats() {
 			rf.mu.Unlock()
 			return
 		}
-
-		// TODO: If command received from client: append entry to local log,
-		// respond after entry applied to state machine (§5.3)
-		// TODO: If last log index ≥ nextIndex for a follower: send
-		// AppendEntries RPC with log entries starting at nextIndex
-		// • If successful: update nextIndex and matchIndex for
-		// follower (§5.3)
-		// • If AppendEntries fails because of log inconsistency:
-		// decrement nextIndex and retry (§5.3)
-		// TODO: If there exists an N such that N > commitIndex, a majority
-		// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
-		// set commitIndex = N (§5.3, §5.4).
 
 		DPrintf("%s[%s][Node %d][Term %d] Sending heartbeats to all peers%s",
 			colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
