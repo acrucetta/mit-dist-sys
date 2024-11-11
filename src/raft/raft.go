@@ -441,8 +441,6 @@ func (rf *Raft) replicateLog() {
 					DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
 						colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
 
-					// TODO: If command received from client: append entry to local log,
-					// respond after entry applied to state machine (§5.3)
 					// TODO: If there exists an N such that N > commitIndex, a majority
 					// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 					// set commitIndex = N (§5.3, §5.4).
@@ -536,20 +534,31 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// Your code here (2B).
-
 	if rf.state != Leader {
 		return -1, rf.currentTerm, false
 	}
 
+	// If command received from client: append entry to local log,
+	// respond after entry applied to state machine (§5.3)
 	entry := LogEntry{
 		Term:    rf.currentTerm,
 		Command: command,
 	}
+	index := len(rf.log) - 1
 	rf.log = append(rf.log, entry)
+
+	// Start by implementing Start(), then write the code to
+	// send and receive new log entries via AppendEntries RPCs,
+	// following Figure 2. Send each newly committed entry on applyCh on each peer.
+
+	DPrintf("%s[%s][Node %d][Term %d] Received new command at index %d%s",
+		colorGreen, rf.state, rf.me, rf.currentTerm, index, colorReset)
+
+	// TODO: Replicate log here?
+
 	rf.persist()
 
-	return len(rf.log) - 1, rf.currentTerm, true
+	return index, rf.currentTerm, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
