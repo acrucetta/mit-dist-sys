@@ -116,6 +116,7 @@ type Raft struct {
 	state       ServerState
 
 	// Volatile state on all servers
+	// Highest log entry known to be committed
 	commitIndex int
 	lastApplied int
 
@@ -382,6 +383,31 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+func (rf *Raft) updateCommitIndex() {
+	// If there exists an N such that N > commitIndex, a majority
+	// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+	// set commitIndex = N (§5.3, §5.4).
+	for N := rf.commitIndex + 1; N < len(rf.log); N++ {
+		if rf.log[N].Term != rf.currentTerm {
+			continue
+		}
+
+		count := 0
+		for _, matchIdx := range rf.matchIndex {
+			if matchIdx > N {
+				count++
+			}
+		}
+
+		if count > len(rf.peers) {
+			rf.commitIndex = N
+			return
+		}
+
+		// TODO: Do something here??
+	}
+}
+
 // Function to replicate log entries
 func (rf *Raft) replicateLog() {
 	for !rf.killed() {
@@ -441,9 +467,7 @@ func (rf *Raft) replicateLog() {
 					DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
 						colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
 
-					// TODO: If there exists an N such that N > commitIndex, a majority
-					// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
-					// set commitIndex = N (§5.3, §5.4).
+					rf.updateCommitIndex()
 
 					// If AppendEntries fails because of log inconsistency:
 					// decrement nextIndex and retry (§5.3)
@@ -555,6 +579,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		colorGreen, rf.state, rf.me, rf.currentTerm, index, colorReset)
 
 	// TODO: Replicate log here?
+	go rf.replicateLog()
 
 	rf.persist()
 
@@ -638,8 +663,6 @@ func (rf *Raft) startElection() {
 // heartbeats recently.
 func (rf *Raft) ticker() {
 	for !rf.killed() {
-		// TODO: Followers are not resetting properly when the leader disconnects,
-		// one of them should become the leader.
 		<-rf.electionTimer.C
 		rf.mu.Lock()
 		rf.resetElectionTimer()
