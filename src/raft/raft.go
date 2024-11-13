@@ -28,17 +28,19 @@ const (
 )
 
 /*
+TODO:
+- Start by implementing Start(), then write the code to send and receive new log
+entries via AppendEntries RPCs, following Figure 2.
+- You will need to implement the election restriction (section 5.4.1 in the paper).
+*/
+
+/*
 References:
 - https://thesquareplanet.com/blog/students-guide-to-raft/#the-importance-of-details
 - https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/
 */
 
 /*
-Debugging questions:
-- The key problem seems to be that your election timeouts aren't being triggered
-properly when the leader is disconnected. The followers should
-timeout and start new elections, but they're not.
-
 Raft Properties:
 - Election Safety: at most one leader can be elected in a given term. §5.2
 - Leader Append-Only: a leader never overwrites or deletes entries in its log; it only appends new entries. §5.3
@@ -392,19 +394,18 @@ func (rf *Raft) updateCommitIndex() {
 			continue
 		}
 
-		count := 0
-		for _, matchIdx := range rf.matchIndex {
-			if matchIdx > N {
+		count := 1
+		for peer := range rf.peers {
+			if rf.me != peer && rf.matchIndex[peer] > N {
 				count++
 			}
 		}
 
-		if count > len(rf.peers) {
+		if count > len(rf.peers)/2 {
 			rf.commitIndex = N
 			return
 		}
 
-		// TODO: Do something here??
 	}
 }
 
@@ -416,6 +417,7 @@ func (rf *Raft) replicateLog() {
 			rf.mu.Unlock()
 			return
 		}
+		currentTerm := rf.currentTerm
 		DPrintf("%s[%s][Node %d][Term %d] Replicating log entries...%s",
 			colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
 
@@ -424,23 +426,27 @@ func (rf *Raft) replicateLog() {
 				continue
 			}
 
-			// If last log index ≥ nextIndex for a follower: send
-			// AppendEntries RPC with log entries starting at nextIndex
-			entries := []LogEntry{}
-			if len(rf.log) > rf.nextIndex[peer] {
-				entries = rf.log[rf.nextIndex[peer]:]
-			}
+			go func(peer int) {
+				// TODO: Review the replicating log entries logic based on this website: 
+				// https://eli.thegreenplace.net/2020/implementing-raft-part-2-commands-and-log-replication/
 
-			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: rf.nextIndex[peer] - 1,
-				PrevLogTerm:  rf.log[rf.nextIndex[peer]-1].Term,
-				Entries:      entries,
-				LeaderCommit: rf.commitIndex,
-			}
+				// If last log index ≥ nextIndex for a follower: send
+				// AppendEntries RPC with log entries starting at nextIndex
+				entries := []LogEntry{}
+				nextIndex := rf.nextIndex[peer]
 
-			go func(peer int, args AppendEntriesArgs) {
+				if len(rf.log) > nextIndex {
+					entries = rf.log[nextIndex:]
+				}
+
+				args := AppendEntriesArgs{
+					Term:         currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: nextIndex - 1,
+					PrevLogTerm:  rf.log[nextIndex-1].Term,
+					Entries:      entries,
+					LeaderCommit: rf.commitIndex,
+				}
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(peer, &args, &reply)
 
@@ -476,7 +482,8 @@ func (rf *Raft) replicateLog() {
 					DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
 						colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
 				}
-			}(peer, args)
+				time.Sleep(10 * time.Millisecond) // Prevent tight loop
+			}(peer)
 		}
 		rf.mu.Unlock()
 	}
@@ -570,18 +577,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index := len(rf.log) - 1
 	rf.log = append(rf.log, entry)
+	rf.persist()
 
-	// Start by implementing Start(), then write the code to
-	// send and receive new log entries via AppendEntries RPCs,
-	// following Figure 2. Send each newly committed entry on applyCh on each peer.
+	// TODO: Send each newly committed entry on applyCh on each peer.
 
 	DPrintf("%s[%s][Node %d][Term %d] Received new command at index %d%s",
 		colorGreen, rf.state, rf.me, rf.currentTerm, index, colorReset)
 
-	// TODO: Replicate log here?
 	go rf.replicateLog()
-
-	rf.persist()
 
 	return index, rf.currentTerm, true
 }
@@ -698,6 +701,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.readPersist(persister.ReadRaftState())
 	rf.resetElectionTimer()
 	go rf.ticker()
-
+	
+	go func() {
+		// This function will keep adding logs to the applied channel
+	}
 	return rf
 }
