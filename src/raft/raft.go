@@ -29,9 +29,10 @@ const (
 
 /*
 TODO:
-- Start by implementing Start(), then write the code to send and receive new log
-entries via AppendEntries RPCs, following Figure 2.
-- You will need to implement the election restriction (section 5.4.1 in the paper).
+- Fix these two tests failing: FailBasicAgree3B, FailConcurrentStart
+	- It might be in how I'm replicating logs.
+	- The issue is in the log replication logic. According to the Raft paper, a leader
+	should still be able to commit entries when there's a majority of nodes available.
 */
 
 /*
@@ -270,10 +271,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	//  If commitIndex > lastApplied: increment lastApplied,
-	//  apply log[lastApplied] to state machine (§5.3)
-	// TODO: Impelement this logic.
-
 	// If RPC request or response contains term T > currentTerm: set
 	// currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
@@ -478,6 +475,7 @@ func (rf *Raft) replicateLog() {
 				DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
 					colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
 			}
+			time.Sleep(10 * time.Millisecond)
 		}(peer)
 	}
 	rf.mu.Unlock()
