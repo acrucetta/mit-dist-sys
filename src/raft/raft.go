@@ -38,6 +38,7 @@ entries via AppendEntries RPCs, following Figure 2.
 References:
 - https://thesquareplanet.com/blog/students-guide-to-raft/#the-importance-of-details
 - https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/
+- https://notes.eatonphil.com/2023-05-25-raft.html
 */
 
 /*
@@ -396,7 +397,7 @@ func (rf *Raft) updateCommitIndex() {
 
 		count := 1
 		for peer := range rf.peers {
-			if rf.me != peer && rf.matchIndex[peer] > N {
+			if rf.me != peer && rf.matchIndex[peer] >= N {
 				count++
 			}
 		}
@@ -411,82 +412,75 @@ func (rf *Raft) updateCommitIndex() {
 
 // Function to replicate log entries
 func (rf *Raft) replicateLog() {
-	for !rf.killed() {
-		rf.mu.Lock()
-		if rf.state != Leader {
-			rf.mu.Unlock()
-			return
-		}
-		currentTerm := rf.currentTerm
-		DPrintf("%s[%s][Node %d][Term %d] Replicating log entries...%s",
-			colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	currentTerm := rf.currentTerm
+	DPrintf("%s[%s][Node %d][Term %d] Replicating log entries...%s",
+		colorCyan, rf.state, rf.me, rf.currentTerm, colorReset)
 
-		for peer := range rf.peers {
-			if peer == rf.me {
-				continue
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+
+		go func(peer int) {
+			// AppendEntries RPC with log entries starting at nextIndex
+			entries := []LogEntry{}
+			ni := rf.nextIndex[peer]
+
+			if len(rf.log) > ni {
+				entries = rf.log[ni:]
 			}
 
-			go func(peer int) {
-				// TODO: Review the replicating log entries logic based on this website: 
-				// https://eli.thegreenplace.net/2020/implementing-raft-part-2-commands-and-log-replication/
+			args := AppendEntriesArgs{
+				Term:         currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: ni - 1,
+				PrevLogTerm:  rf.log[ni-1].Term,
+				Entries:      entries,
+				LeaderCommit: rf.commitIndex,
+			}
+			reply := AppendEntriesReply{}
+			ok := rf.sendAppendEntries(peer, &args, &reply)
 
-				// If last log index ≥ nextIndex for a follower: send
-				// AppendEntries RPC with log entries starting at nextIndex
-				entries := []LogEntry{}
-				nextIndex := rf.nextIndex[peer]
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 
-				if len(rf.log) > nextIndex {
-					entries = rf.log[nextIndex:]
-				}
+			if !ok || rf.state != Leader {
+				DPrintf("%s[%s][Node %d][Term %d] Failed to send append entry to the peer %d, retrying...%s",
+					colorRed, rf.state, rf.me, rf.currentTerm, peer, colorReset)
+				return
+			}
 
-				args := AppendEntriesArgs{
-					Term:         currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: nextIndex - 1,
-					PrevLogTerm:  rf.log[nextIndex-1].Term,
-					Entries:      entries,
-					LeaderCommit: rf.commitIndex,
-				}
-				reply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(peer, &args, &reply)
+			if reply.Term > rf.currentTerm {
+				DPrintf("%s[%s][Node %d][Term %d] Stepping down: peer %d has higher term %d%s",
+					colorRed, rf.state, rf.me, rf.currentTerm, peer, reply.Term, colorReset)
+				rf.becomeFollower(reply.Term)
+				return
+			}
 
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+			// If successful: update nextIndex and matchIndex for follower (§5.3)
+			if reply.Success {
+				rf.nextIndex[peer] = len(rf.log)
+				rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+				DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
+					colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
 
-				if !ok || rf.state != Leader {
-					DPrintf("%s[%s][Node %d][Term %d] Failed to send append entry to the peer %d, retrying...%s",
-						colorRed, rf.state, rf.me, rf.currentTerm, peer, colorReset)
-					return
-				}
+				rf.updateCommitIndex()
 
-				if reply.Term > rf.currentTerm {
-					DPrintf("%s[%s][Node %d][Term %d] Stepping down: peer %d has higher term %d%s",
-						colorRed, rf.state, rf.me, rf.currentTerm, peer, reply.Term, colorReset)
-					rf.becomeFollower(reply.Term)
-					return
-				}
-
-				// If successful: update nextIndex and matchIndex for follower (§5.3)
-				if reply.Success {
-					rf.nextIndex[peer] = len(rf.log)
-					rf.matchIndex[peer] = rf.nextIndex[peer] - 1
-					DPrintf("%s[%s][Node %d][Term %d] Successfully updated peer %d (nextIndex: %d)%s",
-						colorGreen, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
-
-					rf.updateCommitIndex()
-
-					// If AppendEntries fails because of log inconsistency:
-					// decrement nextIndex and retry (§5.3)
-				} else {
-					rf.nextIndex[peer]--
-					DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
-						colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
-				}
-				time.Sleep(10 * time.Millisecond) // Prevent tight loop
-			}(peer)
-		}
-		rf.mu.Unlock()
+				// If AppendEntries fails because of log inconsistency:
+				// decrement nextIndex and retry (§5.3)
+			} else {
+				rf.nextIndex[peer]--
+				DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
+					colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
+			}
+		}(peer)
 	}
+	rf.mu.Unlock()
 }
 
 // Function to send periodical heartbeats with no log entries
@@ -575,11 +569,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    rf.currentTerm,
 		Command: command,
 	}
-	index := len(rf.log) - 1
+	index := len(rf.log)
 	rf.log = append(rf.log, entry)
 	rf.persist()
-
-	// TODO: Send each newly committed entry on applyCh on each peer.
 
 	DPrintf("%s[%s][Node %d][Term %d] Received new command at index %d%s",
 		colorGreen, rf.state, rf.me, rf.currentTerm, index, colorReset)
@@ -701,9 +693,29 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.readPersist(persister.ReadRaftState())
 	rf.resetElectionTimer()
 	go rf.ticker()
-	
+
 	go func() {
-		// This function will keep adding logs to the applied channel
-	}
+		for !rf.killed() {
+			rf.mu.Lock()
+			for rf.lastApplied < rf.commitIndex {
+				rf.lastApplied++
+				entry := rf.log[rf.lastApplied]
+				applyMsg := ApplyMsg{
+					CommandValid: true,
+					Command:      entry.Command,
+					CommandIndex: rf.lastApplied,
+				}
+				DPrintf("%s[%s][Node %d][Term %d] Applying command at index %d%s",
+					getStateColor(rf.state), rf.state, rf.me, rf.currentTerm, rf.lastApplied, colorReset)
+
+				rf.mu.Unlock()
+				rf.applyCh <- applyMsg
+				rf.mu.Lock()
+			}
+
+			rf.mu.Unlock()
+			time.Sleep(10 * time.Millisecond) // Prevent tight loop
+		}
+	}()
 	return rf
 }
