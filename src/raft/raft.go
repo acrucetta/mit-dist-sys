@@ -40,6 +40,7 @@ References:
 - https://thesquareplanet.com/blog/students-guide-to-raft/#the-importance-of-details
 - https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/
 - https://notes.eatonphil.com/2023-05-25-raft.html
+- https://thesquareplanet.com/blog/raft-qa/
 */
 
 /*
@@ -344,7 +345,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reply false if log doesnt contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if args.PrevLogIndex >= len(rf.log) ||
-		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		(args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		DPrintf("%s[%s][Node %d][Term %d] Log consistency check failed%s",
 			colorRed, rf.state, rf.me, rf.currentTerm, colorReset)
 		return
