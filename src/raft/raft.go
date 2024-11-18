@@ -37,6 +37,7 @@ TODO:
 
 /*
 References:
+- https://yunuskilicdev.medium.com/raft-consensus-algorithm-implementation-with-go-d0f9bf4472a0
 - https://thesquareplanet.com/blog/students-guide-to-raft/#the-importance-of-details
 - https://eli.thegreenplace.net/2020/implementing-raft-part-1-elections/
 - https://notes.eatonphil.com/2023-05-25-raft.html
@@ -344,22 +345,42 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Reply false if log doesnt contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
-	if args.PrevLogIndex >= len(rf.log) ||
-		(args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	logLen := len(rf.log)
+	validPrevLog := args.PrevLogIndex == 0 || (args.PrevLogIndex < logLen && rf.log[args.PrevLogIndex].Term == args.PrevLogTerm)
+
+	if !validPrevLog {
 		DPrintf("%s[%s][Node %d][Term %d] Log consistency check failed%s",
 			colorRed, rf.state, rf.me, rf.currentTerm, colorReset)
 		return
 	}
 
-	// 1. If an existing entry conflicts with a new one (same index
+	// If an existing entry conflicts with a new one (same index
 	// but different terms), delete the existing entry and all that
 	// follow it (§5.3)
-	// 2. Append any new entries not already in the log
-	if len(args.Entries) > 0 {
+	// Find an insertion point - term mismatch between the existing log at PrevLogIndex + 1
+	// and the entries in the RPC
+	logInsertIndex := args.PrevLogIndex + 1
+	newEntriesIndex := 0
+	for {
+		// Went too far in the logs
+		if logInsertIndex >= logLen || newEntriesIndex >= len(args.Entries) {
+			break
+		}
+
+		// We get sent entries from the prev log index onwards, that's why we start
+		// new entries index at 0
+		if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+			break
+		}
+		logInsertIndex++
+		newEntriesIndex++
+	}
+
+	// Append any new entries not already in the log
+	if newEntriesIndex < len(args.Entries) {
 		DPrintf("%s[%s][Node %d][Term %d] Appending %d entries to log%s",
 			colorCyan, rf.state, rf.me, rf.currentTerm, len(args.Entries), colorReset)
-		newEntries := args.Entries
-		rf.log = append(rf.log[:args.PrevLogIndex+1], newEntries...)
+		rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
 	}
 
 	// If leaderCommit > commitIndex, set commitIndex =
