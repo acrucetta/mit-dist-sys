@@ -446,19 +446,23 @@ func (rf *Raft) replicateLog() {
 		}
 
 		go func(peer int) {
-			// AppendEntries RPC with log entries starting at nextIndex
-			entries := []LogEntry{}
 			ni := rf.nextIndex[peer]
+			prevLogIndex := ni - 1
+			prevLogTerm := -1
+			if prevLogIndex > 0 {
+				prevLogTerm = rf.log[prevLogIndex].Term
+			}
 
-			if len(rf.log) > ni {
+			var entries []LogEntry
+			if (len(rf.log) - 1) >= ni {
 				entries = rf.log[ni:]
 			}
 
 			args := AppendEntriesArgs{
 				Term:         currentTerm,
 				LeaderId:     rf.me,
-				PrevLogIndex: ni - 1,
-				PrevLogTerm:  rf.log[ni-1].Term,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
 				Entries:      entries,
 				LeaderCommit: rf.commitIndex,
 			}
@@ -504,6 +508,7 @@ func (rf *Raft) replicateLog() {
 }
 
 // Function to send periodical heartbeats with no log entries
+// TODO: Refactor this to merge with replicate log. Review the Eli implementation.
 func (rf *Raft) sendHeartbeats() {
 	for !rf.killed() {
 		rf.mu.Lock()
