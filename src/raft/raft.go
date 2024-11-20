@@ -423,6 +423,8 @@ func (rf *Raft) updateCommitIndex() {
 
 		if count > len(rf.peers)/2 {
 			rf.commitIndex = N
+			// TODO: Signal apply go routine to for the new commits?
+			// Review this part...
 			return
 		}
 
@@ -446,18 +448,17 @@ func (rf *Raft) replicateLog() {
 		}
 
 		go func(peer int) {
+			rf.mu.Lock()
 			ni := rf.nextIndex[peer]
 			prevLogIndex := ni - 1
 			prevLogTerm := -1
 			if prevLogIndex > 0 {
 				prevLogTerm = rf.log[prevLogIndex].Term
 			}
-
 			var entries []LogEntry
 			if (len(rf.log) - 1) >= ni {
 				entries = rf.log[ni:]
 			}
-
 			args := AppendEntriesArgs{
 				Term:         currentTerm,
 				LeaderId:     rf.me,
@@ -466,6 +467,8 @@ func (rf *Raft) replicateLog() {
 				Entries:      entries,
 				LeaderCommit: rf.commitIndex,
 			}
+			rf.mu.Unlock()
+
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(peer, &args, &reply)
 
