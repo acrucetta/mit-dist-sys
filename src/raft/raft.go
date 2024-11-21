@@ -136,7 +136,12 @@ type Raft struct {
 	// Channels for coordination
 	electionTimer     *time.Timer
 	lastElectionReset time.Time
-	applyCh           chan ApplyMsg
+
+	applyCh chan ApplyMsg
+
+	// Internal notification channel used by goroutines that commit
+	// new entries to the log
+	newCommitChan chan struct{}
 }
 
 // -- Helper Functions --
@@ -390,6 +395,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 		DPrintf("%s[%s][Node %d][Term %d] Updated commitIndex: %d -> %d%s",
 			colorCyan, rf.state, rf.me, rf.currentTerm, oldCommitIndex, rf.commitIndex, colorReset)
+		rf.newCommitChan <- struct{}{}
 	}
 
 	reply.Success = true
@@ -409,6 +415,7 @@ func (rf *Raft) updateCommitIndex() {
 	// If there exists an N such that N > commitIndex, a majority
 	// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 	// set commitIndex = N (§5.3, §5.4).
+	savedCommitIndex := rf.commitIndex
 	for N := rf.commitIndex + 1; N < len(rf.log); N++ {
 		if rf.log[N].Term != rf.currentTerm {
 			continue
@@ -423,11 +430,13 @@ func (rf *Raft) updateCommitIndex() {
 
 		if count > len(rf.peers)/2 {
 			rf.commitIndex = N
-			// TODO: Signal apply go routine to for the new commits?
-			// Review this part...
-			return
 		}
+	}
 
+	// If the commited index was updated, we need to apply
+	// the new entries
+	if rf.commitIndex != savedCommitIndex {
+		rf.newCommitChan <- struct{}{}
 	}
 }
 
@@ -497,9 +506,9 @@ func (rf *Raft) replicateLog() {
 
 				rf.updateCommitIndex()
 
+			} else {
 				// If AppendEntries fails because of log inconsistency:
 				// decrement nextIndex and retry (§5.3)
-			} else {
 				rf.nextIndex[peer]--
 				DPrintf("%s[%s][Node %d][Term %d] Failed to update peer %d, decreasing nextIndex to %d%s",
 					colorYellow, rf.state, rf.me, rf.currentTerm, peer, rf.nextIndex[peer], colorReset)
@@ -697,6 +706,30 @@ func (rf *Raft) ticker() {
 				colorRed, rf.state, rf.me, rf.currentTerm, colorReset)
 		}
 		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (rf *Raft) applyChanSender() {
+	for range rf.newCommitChan {
+		rf.mu.Lock()
+		savedLastApplied := rf.lastApplied
+		var entries []LogEntry
+
+		if rf.commitIndex > rf.lastApplied {
+			entries = rf.log[rf.lastApplied+1 : rf.commitIndex+1]
+			rf.lastApplied = rf.commitIndex
+		}
+		rf.mu.Unlock()
+
+		for i, entry := range entries {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: savedLastApplied + i + 1,
+			}
+		}
+		time.Sleep(10 * time.Millisecond) // Prevent tight loop
 	}
 }
 
@@ -706,6 +739,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		persister:     persister,
 		me:            me,
 		applyCh:       applyCh,
+		newCommitChan: make(chan struct{}, 16),
 		currentTerm:   0,
 		votedFor:      -1,
 		log:           []LogEntry{{Term: 0}}, // Initialize with dummy entry
@@ -720,30 +754,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.resetElectionTimer()
+
 	go rf.ticker()
+	go rf.applyChanSender()
 
-	go func() {
-		for !rf.killed() {
-			rf.mu.Lock()
-			for rf.lastApplied < rf.commitIndex {
-				rf.lastApplied++
-				entry := rf.log[rf.lastApplied]
-				applyMsg := ApplyMsg{
-					CommandValid: true,
-					Command:      entry.Command,
-					CommandIndex: rf.lastApplied,
-				}
-				DPrintf("%s[%s][Node %d][Term %d] Applying command at index %d%s",
-					getStateColor(rf.state), rf.state, rf.me, rf.currentTerm, rf.lastApplied, colorReset)
-
-				rf.mu.Unlock()
-				rf.applyCh <- applyMsg
-				rf.mu.Lock()
-			}
-
-			rf.mu.Unlock()
-			time.Sleep(10 * time.Millisecond) // Prevent tight loop
-		}
-	}()
 	return rf
 }
